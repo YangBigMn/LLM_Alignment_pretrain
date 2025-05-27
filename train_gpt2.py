@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import math
 import time
+import inspect
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -145,6 +146,26 @@ class GPT(nn.Module):
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k])
         return model
+    def configure_optimizers(self,weight_decay,lr,device):
+        param_dict = {pn:p for pn,p in self.named_parameters()}
+        param_dict = {pn:p for pn,p in param_dict.items() if p.requires_grad}
+        decay_params = [p for n,p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n,p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        print(f"num of decay param tensors: {len(decay_params)} with num of params: {num_decay_params}")
+        print(f"num of nodecay param tensors: {len(nodecay_params)} with num of params: {num_nodecay_params}")
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and 'cuda' in device
+        print(f"use fused AdamW: {use_fused}")
+        optimizer = torch.optim.AdamW(optim_groups,lr=lr,betas=(0.9,0.95),eps=1e-8,fused=use_fused)
+        return optimizer
+    
+
 import tiktoken
 class DataLoaderLite:
     def __init__(self,B,T):
@@ -204,7 +225,8 @@ def get_lr(step):
     return min_lr + coeff * (max_lr - min_lr)
 
 #logits, loss = model(x.to(device),y.to(device))
-optimizer = torch.optim.AdamW(model.parameters(),lr=6e-4,betas=(0.9,0.95),eps=1e-8)
+#optimizer = torch.optim.AdamW(model.parameters(),lr=6e-4,betas=(0.9,0.95),eps=1e-8)
+optimizer = model.configure_optimizers(weight_decay=0.1,lr=6e-4,device=device)
 for step in range(max_steps):
     t0 = time.time()
     x,y = train_loader.next_batch()
