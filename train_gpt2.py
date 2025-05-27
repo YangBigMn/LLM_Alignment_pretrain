@@ -202,9 +202,15 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
 
+total_bs = 524288 # 2 ** 19
+B = 16
+T = 1024
+assert total_bs % (B * T) == 0, f"total batch size: {total_bs} should be divided by (B*T): {B}*{T}."
+grad_accum_steps = total_bs // (B * T)
+print(f"total batch size: {total_bs}.")
+print(f"compute the corresponding gradient accumulation steps: {grad_accum_steps}.")
 
-train_loader = DataLoaderLite(B=16,T=1024)
-
+train_loader = DataLoaderLite(B=B,T=T)
 torch.set_float32_matmul_precision('high')
 model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
@@ -229,13 +235,17 @@ def get_lr(step):
 optimizer = model.configure_optimizers(weight_decay=0.1,lr=6e-4,device=device)
 for step in range(max_steps):
     t0 = time.time()
-    x,y = train_loader.next_batch()
-    x,y = x.to(device),y.to(device)
     optimizer.zero_grad()
-    with torch.autocast(device_type=device,dtype=torch.bfloat16):
-        logits,loss = model(x,y)
-        #import code; code.interact(local=locals())
-    loss.backward()
+    loss_accum = 0.0
+    for micro_step in range(grad_accum_steps):
+        x,y = train_loader.next_batch()
+        x,y = x.to(device),y.to(device)
+        with torch.autocast(device_type=device,dtype=torch.bfloat16):
+            logits,loss = model(x,y)
+            #import code; code.interact(local=locals())
+            loss = loss / grad_accum_steps
+            loss_accum += loss.detach()
+            loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(),max_norm=1.0)
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
@@ -244,7 +254,7 @@ for step in range(max_steps):
     torch.cuda.synchronize()
     t1 = time.time()
     dt = (t1 - t0) * 1000
-    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
+    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (t1 - t0)
     print(f"step {step} | lr: {lr} | loss: {loss.item()} | norm: {norm:.4f} |  dt: {dt:.2f}ms | tok/sec: {tokens_per_sec:.1f}")
 import sys
 sys.exit(0)
